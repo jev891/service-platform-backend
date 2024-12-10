@@ -24,7 +24,7 @@ class UserCRUD:
         #"UNAUTHORIZED_ACTION": {"status_code": 403, "detail": "Only admins can delete users."},
         try:
             # Validate role
-            valid_roles = ["client", "executor", "admin"]
+            valid_roles = ["client", "executor", "admin", "pending_admin"]
             if role not in valid_roles:
                 raise HTTPException(status_code=400, detail=f"Invalid role. Choose from {valid_roles}")
 
@@ -111,7 +111,7 @@ class UserCRUD:
     @staticmethod
     def filter_users_by_role(db: Session, role: str) -> List[User]:
         """Фильтрация пользователей по роли"""
-        valid_roles = ["client", "executor", "admin"]
+        valid_roles = ["client", "executor", "admin", "pending_admin"]
         if role not in valid_roles:
             raise HTTPException(status_code=400, detail=f"Invalid role. Choose from {valid_roles}")
         

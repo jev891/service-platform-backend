@@ -5,21 +5,22 @@ from typing import Optional
 from app.models.database import get_db
 from app.crud.user_crud import UserCRUD
 from app.utils.security import create_access_token, verify_sms_code, send_sms_code, hash_password
-
+from app.utils.dependencies import get_current_user, require_admin
 
 router = APIRouter()
 
 # Role constants
-ALLOWED_ROLES = ["client", "executor", "admin"]
+ALLOWED_ROLES = ["client", "executor", "admin", "pending_admin"]  # Add pending_admin
+SECURE_ADMIN_KEY = "key2024"  # Replace with a secure, configurable key.
 
-# Схемы для регистрации и входа
+# Schemas
 class UserRegister(BaseModel):
     mobile_number: str
     password: Optional[str] = None
     name: str
     email: Optional[str] = None
     company_name: Optional[str] = None
-    role: Optional[str] = "client"  # Default role is "client"
+    role: Optional[str] = "client"
     location: Optional[str] = None
 
 class LoginRequest(BaseModel):
@@ -27,27 +28,33 @@ class LoginRequest(BaseModel):
     sms_code: str
 
 @router.post("/register", response_model=dict)
-def register_user(user: UserRegister, db: Session = Depends(get_db)):
+def register_user(
+    user: UserRegister,
+    admin_key: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
     """
-    Регистрация нового пользователя.
-    Проверяет наличие пользователя и регистрирует нового при отсутствии.
+    Register a new user.
+    If registering as admin, admin_key is required.
     """
-    # Проверяем, существует ли пользователь
     existing_user = UserCRUD.get_user(db, mobile_number=user.mobile_number)
     if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
     
-    # Validate the role
+    # Validate role
     if user.role not in ALLOWED_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Allowed roles: {ALLOWED_ROLES}")
+
+    # Handle admin registration
+    approved_role = user.role
+    if user.role == "admin":
+        if admin_key != SECURE_ADMIN_KEY:
+            approved_role = "pending_admin"
 
     # Hash the password
     hashed_password = hash_password(user.password)
 
-    # Handle admin approval
-    approved_role = user.role if user.role != "admin" else "pending_admin"
-
-    # Регистрируем нового пользователя
+    # Create the user
     new_user = UserCRUD.create_user(
         db=db,
         mobile_number=user.mobile_number,
@@ -60,22 +67,39 @@ def register_user(user: UserRegister, db: Session = Depends(get_db)):
     )
     return {"id": new_user.id, "mobile_number": new_user.mobile_number, "role": new_user.role}
 
+@router.patch("/approve-admin/{user_id}", response_model=dict)
+def approve_admin(
+    user_id: int,
+    admin_user: dict = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Approve a pending admin. Only accessible by current admins.
+    """
+    user = UserCRUD.get_user(db, user_id=user_id)
+    if not user or user.role != "pending_admin":
+        raise HTTPException(status_code=404, detail="Pending admin not found")
+    
+    user.role = "admin"
+    db.commit()
+    db.refresh(user)
+    return {"detail": f"User {user_id} promoted to admin."}
+
+# Other existing routes (send-sms, login, etc.)
+
+
 @router.post("/login", response_model=dict)
 def login_user(request: LoginRequest, db: Session = Depends(get_db)):
     """
     Вход с помощью SMS-кода.
-    Проверяет код и возвращает JWT токен.
     """
-    # Ищем пользователя по номеру телефона
     user = UserCRUD.get_user(db, mobile_number=request.mobile_number)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Проверяем SMS-код
     if not verify_sms_code(user.mobile_number, request.sms_code):
         raise HTTPException(status_code=403, detail="Invalid SMS code")
     
-    # Генерируем JWT токен
     token = create_access_token({"sub": user.mobile_number, "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
@@ -84,7 +108,20 @@ def send_sms(mobile_number: str):
     """
     Отправка SMS-кода пользователю.
     """
-    # Отправляем SMS-код
     if not send_sms_code(mobile_number):
         raise HTTPException(status_code=500, detail="Failed to send SMS")
     return {"detail": "SMS sent successfully"}
+
+@router.get("/profile", response_model=dict)
+def get_profile(current_user: dict = Depends(get_current_user)):
+    """
+    Получить профиль текущего пользователя.
+    """
+    return {"mobile_number": current_user["sub"], "role": current_user["role"]}
+
+@router.get("/admin-only", response_model=dict)
+def admin_only_route(admin_user: dict = Depends(require_admin)):
+    """
+    Пример маршрута, доступного только для администраторов.
+    """
+    return {"message": "Welcome, Admin!"}
